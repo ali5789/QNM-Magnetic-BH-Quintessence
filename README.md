@@ -8,6 +8,7 @@ The work presents a numerical study of quasinormal mode (QNM) spectra for a stat
 ⚠️ Note on Accuracy  
 This repository uses a simplified 1st-order WKB approximation for reproducibility.  
 The exact values in the paper were obtained using higher-order methods, so small numerical differences are expected.  
+Numerical stability note: For some combinations with large quintessence or charge, the effective potential may not form a clean barrier outside the horizon. In such cases the 1st-order WKB routine prints a clear message and skips that run. Try slightly smaller --quintessence or --charge, or higher multipole --multipole 3
 
 
  # Repository Structure
