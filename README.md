@@ -14,7 +14,7 @@ QNM-Magnetic-BH-Quintessence/
 │   ├── geometry.py
 │   ├── potentials.py
 │   ├── wkb.py
-│   └── requirements.py
+│   └── requirements.txt
 ├── data/
 │   └── schwarzschild.dat
 ├── README.md
