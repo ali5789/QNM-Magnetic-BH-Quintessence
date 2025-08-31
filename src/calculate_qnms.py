@@ -1,75 +1,121 @@
-#!/usr/bin/env python3
-"""
-Main script to calculate QNMs for a magnetically charged BH with quintessence.
-This is a simplified version for demonstration and reproducibility.
-"""
-
-import argparse
 import numpy as np
-from wkb import find_potential_maximum, calculate_wkb
-from geometry import d2f_dr2, df_dr
 
-def main():
-    parser = argparse.ArgumentParser(description="Calculate QNMs using WKB approximation")
-    parser.add_argument('--mass', '-M', type=float, default=1.0, help='Black hole mass')
-    parser.add_argument('--charge', '-Q', type=float, default=0.0, help='Magnetic charge Q_m')
-    parser.add_argument('--quintessence', '-c', type=float, default=0.0, help='Quintessence parameter c_q')
-    parser.add_argument('--omega_q', '-w', type=float, default=-0.6667, help='EOS parameter ω_q (default: -2/3)')
-    parser.add_argument('--multipole', '-l', type=int, default=2, help='Angular number ℓ (default: 2)')
-    parser.add_argument('--overtone', '-n', type=int, default=0, help='Overtone number n (default: 0)')
-    
-    args = parser.parse_args()
+def f(r, M, Q_m, c_q, omega_q):
+    """
+    Metric function f(r).
+    Note: for omega_q = -2/3, the quintessence term behaves ~ +c_q * r.
+    """
+    Q_squared = 2 * np.pi * Q_m**2
+    # guard against r <= 0
+    r = np.asarray(r, dtype=float)
+    if np.any(r <= 0):
+        return np.nan
+    charge_term = Q_squared / r**2
+    # c_q / r**(3*omega_q+1)  (for omega_q=-2/3, exponent ≈ -1, so this is c_q / r**(-1) = c_q * r)
+    exp = 3.0*omega_q + 1.0
+    quintessence_term = c_q / (r**exp)
+    return 1.0 - (2.0*M)/r + charge_term - quintessence_term
 
-    print("="*50)
-    print("QNM Calculator: Magnetically Charged BH + Quintessence")
-    print("="*50)
-    print(f"Parameters: M={args.mass}, Q_m={args.charge}, c_q={args.quintessence}, ω_q={args.omega_q}")
-    print(f"Mode: l={args.multipole}, n={args.overtone} (scalar perturbations)")
-    print("Method: 1st-order WKB approximation")
-    print("="*50)
+def df_dr(r, M, Q_m, c_q, omega_q):
+    """Numerical derivative of f using a safe, small step."""
+    h = 1e-5
+    return (f(r + h, M, Q_m, c_q, omega_q) - f(r - h, M, Q_m, c_q, omega_q)) / (2.0*h)
 
-    # 1. Find the peak of the potential
-    print("Step 1/3: Finding potential maximum...")
-    try:
-        r0, V0 = find_potential_maximum(args.multipole, args.mass, args.charge, args.quintessence, args.omega_q)
-        print(f"   Found at r0 = {r0:.6f}")
-        print(f"   V(r0) = {V0:.6f}")
-    except RuntimeError as e:
-        print(f"   Error: {e}")
-        return
+def effective_potential_scalar(r, l, M, Q_m, c_q, omega_q):
+    """
+    Effective potential for scalar perturbations V(r) = f(r) * [ l(l+1)/r^2 + f'(r)/r ].
+    Returns NaN if any ingredient is invalid.
+    """
+    fr = f(r, M, Q_m, c_q, omega_q)
+    if not np.isfinite(fr):
+        return np.nan
+    dfr = df_dr(r, M, Q_m, c_q, omega_q)
+    if not np.isfinite(dfr):
+        return np.nan
+    return fr * ( (l*(l+1)) / (r**2) + dfr / r )
 
-    # 2. Calculate the second derivative of the potential at r0 (simplified)
-    print("Step 2/3: Calculating potential curvature...")
-    # For a more accurate WKB, we need d²V/dr² at r0. For this test, we approximate it.
-    h = 1e-3
-    from potentials import effective_potential_scalar
-    V_plus = effective_potential_scalar(r0 + h, args.multipole, args.mass, args.charge, args.quintessence, args.omega_q)
-    V_minus = effective_potential_scalar(r0 - h, args.multipole, args.mass, args.charge, args.quintessence, args.omega_q)
-    V0_second_derivative = (V_plus - 2*V0 + V_minus) / (h**2)
-    print(f"   V''(r0) = {V0_second_derivative:.6f}")
+def find_outer_horizon(M, Q_m, c_q, omega_q, r_min=1e-3, r_max=200.0, N=20000):
+    """
+    Find the largest root of f(r)=0 in [r_min, r_max] by scanning.
+    Returns r_h (outer horizon) or None if not found.
+    """
+    rs = np.linspace(r_min, r_max, N)
+    frs = f(rs, M, Q_m, c_q, omega_q)
+    # look for sign changes
+    sign = np.sign(frs)
+    idx = np.where((sign[:-1] * sign[1:] < 0) & np.isfinite(frs[:-1]) & np.isfinite(frs[1:]))[0]
+    if idx.size == 0:
+        return None
+    # take the largest r where a sign change occurs (outer horizon)
+    i = idx[-1]
+    # refine root by bisection
+    a, b = rs[i], rs[i+1]
+    for _ in range(60):
+        m = 0.5*(a+b)
+        fa, fm = f(a, M, Q_m, c_q, omega_q), f(m, M, Q_m, c_q, omega_q)
+        if not (np.isfinite(fa) and np.isfinite(fm)):  # fallback
+            break
+        if fa*fm <= 0:
+            b = m
+        else:
+            a = m
+    return 0.5*(a+b)
 
-    # 3. Calculate the QNM frequency
-    print("Step 3/3: Calculating QNM frequency...")
-    omega = calculate_wkb(V0, V0_second_derivative, args.overtone)
+def find_potential_maximum(l, M, Q_m, c_q, omega_q, rmax=200.0):
+    """
+    Robustly find the peak of V(r):
+    - start just outside the outer horizon
+    - sample V on a grid and pick the max
+    """
+    r_h = find_outer_horizon(M, Q_m, c_q, omega_q)
+    if r_h is None:
+        # no horizon found; assume safe inner bound
+        r_start = 2.5
+    else:
+        r_start = max(r_h*1.1, 2.1)  # 10% outside horizon, but not below ~2M
+    r_end = rmax
 
-    print("="*50)
-    print("RESULTS:")
-    print("="*50)
-    print(f"Complex Frequency Mω = {omega.real:.6f} {np.sign(omega.imag)} i{abs(omega.imag):.6f}")
-    print(f"Oscillation Frequency Re(ω) = {omega.real:.6f} (1/M)")
-    print(f"Damping Rate Im(ω) = {omega.imag:.6f} (1/M)")
-    print("="*50)
+    # sample on a grid
+    rs = np.linspace(r_start, r_end, 5000)
+    Vs = np.array([effective_potential_scalar(r, l, M, Q_m, c_q, omega_q) for r in rs])
+    # mask invalid values
+    mask = np.isfinite(Vs)
+    if not np.any(mask):
+        raise RuntimeError("All potential evaluations failed. Try smaller quintessence or charge.")
+    rs, Vs = rs[mask], Vs[mask]
 
-    # Compare to known Schwarzschild value if parameters are default
-    if args.charge == 0.0 and args.quintessence == 0.0 and args.multipole == 2 and args.overtone == 0:
-        known_schwarzschild = 0.37367 - 1j*0.08896
-        error_real = abs(omega.real - known_schwarzschild.real) / known_schwarzschild.real * 100
-        error_imag = abs(omega.imag - known_schwarzschild.imag) / abs(known_schwarzschild.imag) * 100
-        print(f"Comparison to Schwarzschild (l=2,n=0):")
-        print(f"   Known value: {known_schwarzschild.real:.5f} - i{abs(known_schwarzschild.imag):.5f}")
-        print(f"   Error: Re(ω) = {error_real:.2f}%, Im(ω) = {error_imag:.2f}%")
-        print("(A small error is expected due to the numerical approximation.)")
-        print("="*50)
+    # require some positive barrier
+    if np.max(Vs) <= 0.0:
+        raise RuntimeError("No positive potential barrier found; WKB not applicable for these parameters.")
 
-if __name__ == "__main__":
-    main()
+    # argmax
+    j = int(np.argmax(Vs))
+    r0 = rs[j]
+    V0 = Vs[j]
+    return r0, V0
+
+def second_derivative_central(fun, x0, h):
+    """Second derivative with robust central difference."""
+    f0 = fun(x0)
+    fp = fun(x0 + h)
+    fm = fun(x0 - h)
+    if not (np.isfinite(f0) and np.isfinite(fp) and np.isfinite(fm)):
+        return np.nan
+    return (fp - 2.0*f0 + fm) / (h**2)
+
+def calculate_wkb(V0, V0_second_derivative, n):
+    """
+    1st-order WKB frequency.
+    Adds guards to avoid NaNs when curvature sign is wrong.
+    """
+    if not (np.isfinite(V0) and np.isfinite(V0_second_derivative)):
+        return np.nan + 1j*np.nan
+    # We need a local maximum -> V0'' < 0
+    if V0_second_derivative >= 0:
+        return np.nan + 1j*np.nan
+    omega_square = V0 - 1j * (n + 0.5) * np.sqrt(-2.0 * V0_second_derivative)
+    omega = np.sqrt(omega_square)
+    # choose the decaying mode (negative imaginary part)
+    if omega.imag > 0:
+        omega = -omega
+    return omega
